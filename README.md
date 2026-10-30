@@ -6,6 +6,7 @@ App web para hacer seguimiento **semanal** del desempeño de publicaciones de Me
 - Cargás vistas, clicks y ventas **acumulados** (como los muestra Mercado Libre) y la app calcula lo que pasó en cada semana restando contra la anterior.
 - Tabla semana a semana con vistas, clicks, ventas, precio, facturación (ventas × precio) y conversión (ventas ÷ vistas), con el % de cambio contra la semana anterior (verde si sube, rojo si baja).
 - Gráficos de evolución de vistas y de ventas.
+- Solapa **Resumen** en cada cuenta: elegís un período (ej. 30/09/2026 a 30/10/2026, o atajos como “Últimos 30 días” o “Mes anterior”) y ves vistas, clicks, ventas, facturación y conversión del período, comparadas contra el período anterior del mismo largo, con detalle por publicación y los mismos gráficos semanales. Puede abarcar una cuenta o todas.
 - Datos guardados en el navegador, copia de seguridad (JSON) descargable/restaurable y exportación a Excel.
 - Funciona en el celular y respeta el modo oscuro del sistema.
 

@@ -83,10 +83,98 @@
     };
   }
 
+  // ---------- Resumen por período ----------
+
+  // Suma días a una fecha ISO (yyyy-mm-dd) sin problemas de zona horaria.
+  function addDays(iso, n) {
+    const d = new Date(iso + 'T00:00:00Z');
+    d.setUTCDate(d.getUTCDate() + n);
+    return d.toISOString().slice(0, 10);
+  }
+
+  function daysBetween(from, to) {
+    return Math.round((Date.parse(to + 'T00:00:00Z') - Date.parse(from + 'T00:00:00Z')) / 86400000);
+  }
+
+  // Lunes de la semana de una fecha ISO.
+  function weekStart(iso) {
+    const dow = new Date(iso + 'T00:00:00Z').getUTCDay(); // 0 = domingo
+    return addDays(iso, -((dow + 6) % 7));
+  }
+
+  function totalsOf(rows) {
+    const t = { weeks: rows.length, views: 0, clicks: 0, sales: 0, revenue: 0 };
+    rows.forEach((r) => {
+      t.views += r.views;
+      t.clicks += r.clicks;
+      t.sales += r.sales;
+      t.revenue += r.revenue;
+    });
+    t.conversion = t.views > 0 ? t.sales / t.views : null;
+    t.avgPrice = t.sales > 0 ? t.revenue / t.sales : rows.length ? rows[rows.length - 1].price : null;
+    return t;
+  }
+
+  /*
+   * Resume un período [from, to] (fechas ISO, inclusive) para varias publicaciones.
+   * Se cuentan las semanas cuya fecha de carga cae dentro del período (la fila
+   * "punto de partida" no suma). Compara contra el período anterior de igual largo.
+   *   items: [{ account, post }]
+   * Devuelve { from, to, prevFrom, prevTo, total, prevTotal, change, byPost, series }.
+   */
+  function summarizePeriod(items, from, to) {
+    const len = daysBetween(from, to) + 1;
+    const prevTo = addDays(from, -1);
+    const prevFrom = addDays(prevTo, -(len - 1));
+    const inRange = (r, a, b) => !r.isStart && r.date >= a && r.date <= b;
+
+    const all = [];
+    const allPrev = [];
+    const byPost = items.map(({ account, post }) => {
+      const rows = computeWeeks(post.weeks, post);
+      const cur = rows.filter((r) => inRange(r, from, to));
+      const prev = rows.filter((r) => inRange(r, prevFrom, prevTo));
+      all.push(...cur);
+      allPrev.push(...prev);
+      const t = totalsOf(cur);
+      const pt = totalsOf(prev);
+      return { account, post, totals: t, change: changesOf(pt, t) };
+    });
+
+    const total = totalsOf(all);
+    const prevTotal = totalsOf(allPrev);
+
+    // Serie semanal: agrupa por semana (lunes a domingo) sumando todas las publicaciones.
+    const buckets = new Map();
+    all.forEach((r) => {
+      const key = weekStart(r.date);
+      const b = buckets.get(key) || { key, views: 0, clicks: 0, sales: 0, revenue: 0 };
+      b.views += r.views;
+      b.clicks += r.clicks;
+      b.sales += r.sales;
+      b.revenue += r.revenue;
+      buckets.set(key, b);
+    });
+    const series = [...buckets.values()].sort((a, b) => (a.key < b.key ? -1 : 1));
+    series.forEach((b, i) => {
+      const p = series[i - 1];
+      b.change = { views: p ? pctChange(p.views, b.views) : null, sales: p ? pctChange(p.sales, b.sales) : null };
+    });
+
+    return { from, to, prevFrom, prevTo, total, prevTotal, change: changesOf(prevTotal, total), byPost, series };
+  }
+
+  function changesOf(prev, curr) {
+    if (!prev.weeks || !curr.weeks) return {};
+    const c = {};
+    ['views', 'clicks', 'sales', 'revenue', 'conversion', 'avgPrice'].forEach((m) => { c[m] = pctChange(prev[m], curr[m]); });
+    return c;
+  }
+
   function num(v) {
     const n = Number(v);
     return isFinite(n) ? n : 0;
   }
 
-  window.KanshiCalc = { computeWeeks, summarize, sortWeeks, pctChange, METRICS };
+  window.KanshiCalc = { computeWeeks, summarize, summarizePeriod, sortWeeks, pctChange, addDays, METRICS };
 })();

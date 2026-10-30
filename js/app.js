@@ -6,6 +6,7 @@
   'use strict';
 
   const SCHEMA_VERSION = 1;
+  const SUMMARY_TAB = '__resumen__';
   const $ = (sel) => document.querySelector(sel);
 
   let state = null;
@@ -18,6 +19,10 @@
     return Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
   }
 
+  function defaultUi() {
+    return { accountId: null, postByAccount: {}, newestFirst: true, period: { from: null, to: null, scope: 'account' } };
+  }
+
   function defaultState() {
     return {
       version: SCHEMA_VERSION,
@@ -25,7 +30,7 @@
         { id: uid(), name: 'Cuenta 1', posts: [] },
         { id: uid(), name: 'Cuenta 2', posts: [] },
       ],
-      ui: { accountId: null, postByAccount: {}, newestFirst: true },
+      ui: defaultUi(),
     };
   }
 
@@ -53,7 +58,7 @@
           })),
         })),
       })),
-      ui: Object.assign({ accountId: null, postByAccount: {}, newestFirst: true }, raw.ui || {}),
+      ui: Object.assign(defaultUi(), raw.ui || {}),
     };
     if (!s.accounts.length) s.accounts = defaultState().accounts;
     return s;
@@ -74,9 +79,15 @@
   const currentAccount = () =>
     state.accounts.find((a) => a.id === state.ui.accountId) || state.accounts[0];
 
+  const isSummaryTab = () => {
+    const acc = currentAccount();
+    return acc.posts.length > 0 && state.ui.postByAccount[acc.id] === SUMMARY_TAB;
+  };
+
   function currentPost() {
     const acc = currentAccount();
     const id = state.ui.postByAccount[acc.id];
+    if (id === SUMMARY_TAB && acc.posts.length) return null;
     return acc.posts.find((p) => p.id === id) || acc.posts[0] || null;
   }
 
@@ -118,11 +129,11 @@
     return Number(s);
   }
 
-  function changeBadge(value) {
+  function changeBadge(value, title = 'Contra la semana anterior') {
     if (value == null) return '<span class="chg chg-none">—</span>';
     if (Math.abs(value) < 0.0005) return '<span class="chg chg-flat">= 0,0%</span>';
     const up = value > 0;
-    return `<span class="chg ${up ? 'chg-up' : 'chg-down'}" title="Contra la semana anterior">${up ? '▲' : '▼'} ${nfPct.format(Math.abs(value))}</span>`;
+    return `<span class="chg ${up ? 'chg-up' : 'chg-down'}" title="${title}">${up ? '▲' : '▼'} ${nfPct.format(Math.abs(value))}</span>`;
   }
 
   // ---------- Render ----------
@@ -148,7 +159,10 @@
       el.innerHTML = '';
       return;
     }
-    el.innerHTML = acc.posts
+    const summary = isSummaryTab();
+    el.innerHTML = `<button role="tab" class="tab tab-summary ${summary ? 'active' : ''}" aria-selected="${summary}" data-post="${SUMMARY_TAB}">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V10 M10 20V4 M16 20v-7 M22 20H2"/></svg>Resumen
+      </button>` + acc.posts
       .map((p) => `<button role="tab" class="tab ${post && p.id === post.id ? 'active' : ''}" aria-selected="${post && p.id === post.id}" data-post="${p.id}">${esc(p.name)}<span class="tab-count">${p.weeks.length}</span></button>`)
       .join('');
     const active = el.querySelector('.tab.active');
@@ -160,6 +174,8 @@
     const view = $('#post-view');
     const acc = currentAccount();
     const post = currentPost();
+
+    if (isSummaryTab()) return renderPeriodView();
 
     if (!post) {
       view.innerHTML = `
@@ -328,6 +344,174 @@
       </section>`;
   }
 
+  // ---------- Resumen por período ----------
+
+  function periodItems() {
+    const accounts = state.ui.period.scope === 'all' ? state.accounts : [currentAccount()];
+    return accounts.flatMap((account) => account.posts.map((post) => ({ account, post })));
+  }
+
+  function periodPreset(preset) {
+    const today = todayISO();
+    const [y, m] = today.split('-').map(Number);
+    const pad = (n) => String(n).padStart(2, '0');
+    switch (preset) {
+      case '30d': return { from: KanshiCalc.addDays(today, -30), to: today };
+      case '90d': return { from: KanshiCalc.addDays(today, -90), to: today };
+      case 'month': return { from: `${y}-${pad(m)}-01`, to: today };
+      case 'prev-month': {
+        const first = m === 1 ? `${y - 1}-12-01` : `${y}-${pad(m - 1)}-01`;
+        return { from: first, to: KanshiCalc.addDays(`${y}-${pad(m)}-01`, -1) };
+      }
+      case 'all': {
+        const dates = periodItems().flatMap((i) => i.post.weeks.map((w) => w.date)).filter(Boolean).sort();
+        return dates.length ? { from: dates[0], to: dates[dates.length - 1] > today ? dates[dates.length - 1] : today } : periodPreset('30d');
+      }
+    }
+  }
+
+  function renderPeriodView() {
+    const view = $('#post-view');
+    const p = state.ui.period;
+    if (!p.from || !p.to) Object.assign(p, periodPreset('30d'));
+    const all = p.scope === 'all';
+
+    const presets = [['30d', 'Últimos 30 días'], ['90d', 'Últimos 90 días'], ['month', 'Este mes'], ['prev-month', 'Mes anterior'], ['all', 'Todo']];
+    const controls = `
+      <section class="card period-controls">
+        <div class="period-dates">
+          <label class="field">
+            <span>Desde</span>
+            <input type="date" data-period="from" value="${esc(p.from)}" />
+          </label>
+          <label class="field">
+            <span>Hasta</span>
+            <input type="date" data-period="to" value="${esc(p.to)}" />
+          </label>
+        </div>
+        <div class="period-presets">
+          ${presets.map(([k, l]) => `<button class="chip" data-action="period-preset" data-preset="${k}">${l}</button>`).join('')}
+        </div>
+        <div class="segmented segmented-sm" role="group" aria-label="Alcance">
+          <button class="seg ${all ? '' : 'active'}" data-action="period-scope" data-scope="account">${esc(currentAccount().name)}</button>
+          <button class="seg ${all ? 'active' : ''}" data-action="period-scope" data-scope="all">Todas las cuentas</button>
+        </div>
+      </section>`;
+
+    const head = `
+      <div class="post-head">
+        <div class="post-title"><h2>Resumen del período</h2></div>
+      </div>`;
+
+    if (p.from > p.to) {
+      view.innerHTML = head + controls + '<p class="form-error period-error">La fecha “Desde” tiene que ser anterior a “Hasta”.</p>';
+      return;
+    }
+
+    const sum = KanshiCalc.summarizePeriod(periodItems(), p.from, p.to);
+    const t = sum.total;
+    const prevLabel = `${fmtDate(sum.prevFrom)} – ${fmtDate(sum.prevTo)}`;
+    const vsPrev = (m) => {
+      if (!sum.prevTotal.weeks) return '<span class="muted">Sin datos del período anterior</span>';
+      return `${changeBadge(sum.change[m], `Contra ${prevLabel}`)} <span class="muted">vs. período anterior</span>`;
+    };
+    const card = (label, value, m) => `
+      <div class="stat">
+        <span class="stat-label">${label}</span>
+        <span class="stat-value">${value}</span>
+        <span class="stat-sub">${vsPrev(m)}</span>
+      </div>`;
+
+    const badge = (r, m) => (r.change[m] === undefined ? '' : `<div>${changeBadge(r.change[m], `Contra ${prevLabel}`)}</div>`);
+    const tableRows = sum.byPost
+      .map((r) => {
+        const x = r.totals;
+        const empty = !x.weeks;
+        return `
+        <tr class="${empty ? 'row-empty' : ''}">
+          <th scope="row" class="week-cell">
+            <button class="link-btn post-link" data-action="open-post" data-account="${r.account.id}" data-post="${r.post.id}">${esc(r.post.name)}</button>
+            ${all ? `<span class="week-date">${esc(r.account.name)}</span>` : ''}
+          </th>
+          <td class="num">${x.weeks}</td>
+          <td class="num">${empty ? '—' : fmtInt(x.views)}${badge(r, 'views')}</td>
+          <td class="num">${empty ? '—' : fmtInt(x.clicks)}${badge(r, 'clicks')}</td>
+          <td class="num">${empty ? '—' : fmtInt(x.sales)}${badge(r, 'sales')}</td>
+          <td class="num">${fmtMoney(x.avgPrice)}${badge(r, 'avgPrice')}</td>
+          <td class="num">${empty ? '—' : fmtMoney(x.revenue)}${badge(r, 'revenue')}</td>
+          <td class="num">${fmtConv(x.conversion)}${badge(r, 'conversion')}</td>
+        </tr>`;
+      })
+      .join('');
+
+    const table = `
+      <section class="card table-card">
+        <div class="card-head"><h3>Por publicación</h3></div>
+        <div class="table-scroll">
+          <table class="weeks">
+            <thead>
+              <tr>
+                <th scope="col">Publicación</th>
+                <th scope="col" class="num">Semanas</th>
+                <th scope="col" class="num">Vistas</th>
+                <th scope="col" class="num">Clicks</th>
+                <th scope="col" class="num">Ventas</th>
+                <th scope="col" class="num">Precio prom.</th>
+                <th scope="col" class="num">Facturación</th>
+                <th scope="col" class="num">Conversión</th>
+              </tr>
+            </thead>
+            <tbody>${tableRows}</tbody>
+            <tfoot>
+              <tr>
+                <th scope="row">Total</th>
+                <td class="num">${t.weeks}</td>
+                <td class="num">${fmtInt(t.views)}</td>
+                <td class="num">${fmtInt(t.clicks)}</td>
+                <td class="num">${fmtInt(t.sales)}</td>
+                <td class="num">${fmtMoney(t.avgPrice)}</td>
+                <td class="num">${fmtMoney(t.revenue)}</td>
+                <td class="num">${fmtConv(t.conversion)}</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+        <div class="table-note">
+          <p>Se suman las semanas cuya fecha de carga cae entre el ${fmtDate(sum.from)} y el ${fmtDate(sum.to)}. Los % comparan contra el período anterior del mismo largo (${prevLabel}). Precio prom. = facturación ÷ ventas.</p>
+        </div>
+      </section>`;
+
+    const body = t.weeks
+      ? `
+        <section class="stats stats-5" aria-label="Totales del período">
+          ${card('Vistas', fmtInt(t.views), 'views')}
+          ${card('Clicks', fmtInt(t.clicks), 'clicks')}
+          ${card('Ventas', fmtInt(t.sales), 'sales')}
+          ${card('Facturación', fmtMoney(t.revenue), 'revenue')}
+          ${card('Conversión', fmtConv(t.conversion), 'conversion')}
+        </section>
+        ${table}
+        ${renderChartsShell(sum.series)}`
+      : `
+        <div class="empty card">
+          <div class="empty-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 5h16v15H4z M4 10h16 M9 3v4 M15 3v4"/></svg></div>
+          <h2>No hay semanas cargadas en este período</h2>
+          <p>Probá con otras fechas o elegí “Todo”.</p>
+        </div>`;
+
+    view.innerHTML = head + controls + body;
+
+    if (t.weeks) {
+      drawLineCharts(sum.series.map((b) => ({
+        label: fmtDate(b.key, true),
+        title: `Semana del ${fmtDate(b.key)} al ${fmtDate(KanshiCalc.addDays(b.key, 6))}`,
+        views: b.views,
+        sales: b.sales,
+        change: b.change,
+      })));
+    }
+  }
+
   // ---------- Gráficos ----------
 
   function destroyCharts() {
@@ -335,11 +519,23 @@
     charts = [];
   }
 
+  // Gráficos de una publicación: un punto por semana cargada.
   function drawCharts(rows) {
+    drawLineCharts(rows.map((r) => ({
+      label: [`Sem ${r.number}`, fmtDate(r.date, true)],
+      title: `Semana ${r.number} · ${fmtDate(r.date)}`,
+      views: r.views,
+      sales: r.sales,
+      change: r.isBaseline ? null : r.change,
+    })));
+  }
+
+  // points: [{ label, title, views, sales, change: { views, sales } | null }]
+  function drawLineCharts(points) {
     if (!window.Chart) return;
     const css = getComputedStyle(document.documentElement);
     const v = (name) => css.getPropertyValue(name).trim();
-    const labels = rows.map((r) => [`Sem ${r.number}`, fmtDate(r.date, true)]);
+    const labels = points.map((p) => p.label);
 
     const make = (id, data, color, labelFor) => {
       const ctx = document.getElementById(id);
@@ -377,11 +573,8 @@
                 cornerRadius: 8,
                 displayColors: false,
                 callbacks: {
-                  title: (items) => {
-                    const r = rows[items[0].dataIndex];
-                    return `Semana ${r.number} · ${fmtDate(r.date)}`;
-                  },
-                  label: (item) => labelFor(rows[item.dataIndex]),
+                  title: (items) => points[items[0].dataIndex].title,
+                  label: (item) => labelFor(points[item.dataIndex]),
                 },
               },
             },
@@ -403,13 +596,13 @@
       );
     };
 
-    const withChange = (txt, r, m) => {
-      const c = r.change[m];
-      if (r.isBaseline || c == null) return txt;
+    const withChange = (txt, p, m) => {
+      const c = p.change && p.change[m];
+      if (c == null) return txt;
       return `${txt} (${c >= 0 ? '+' : '−'}${nfPct.format(Math.abs(c))})`;
     };
-    make('chart-views', rows.map((r) => r.views), v('--series-views'), (r) => withChange(`${fmtInt(r.views)} vistas`, r, 'views'));
-    make('chart-sales', rows.map((r) => r.sales), v('--series-sales'), (r) => withChange(`${fmtInt(r.sales)} ventas`, r, 'sales'));
+    make('chart-views', points.map((p) => p.views), v('--series-views'), (p) => withChange(`${fmtInt(p.views)} vistas`, p, 'views'));
+    make('chart-sales', points.map((p) => p.sales), v('--series-sales'), (p) => withChange(`${fmtInt(p.sales)} ventas`, p, 'sales'));
   }
 
   // ---------- Diálogos ----------
@@ -803,6 +996,19 @@
         case 'add-week': return weekDialog(post);
         case 'edit-week': return weekDialog(post, post.weeks.find((w) => w.id === b.dataset.week));
         case 'delete-week': return deleteWeek(b.dataset.week);
+        case 'period-preset':
+          Object.assign(state.ui.period, periodPreset(b.dataset.preset));
+          persist();
+          return renderPostView();
+        case 'period-scope':
+          state.ui.period.scope = b.dataset.scope;
+          persist();
+          return renderPostView();
+        case 'open-post':
+          state.ui.accountId = b.dataset.account;
+          state.ui.postByAccount[b.dataset.account] = b.dataset.post;
+          persist();
+          return render();
         case 'toggle-baseline':
           post.firstIsBaseline = !post.firstIsBaseline;
           persist();
@@ -812,6 +1018,14 @@
           persist();
           return renderPostView();
       }
+    });
+
+    $('#post-view').addEventListener('change', (e) => {
+      const field = e.target.dataset.period;
+      if (!field || !e.target.value) return;
+      state.ui.period[field] = e.target.value;
+      persist();
+      renderPostView();
     });
 
     // Menú de respaldo
