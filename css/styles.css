@@ -373,6 +373,34 @@ table.weeks { width: 100%; border-collapse: separate; border-spacing: 0; font-si
 .check[hidden] { display: none; }
 .check input { width: 18px; height: 18px; margin: 1px 0 0; accent-color: var(--primary); flex-shrink: 0; }
 
+/* ---------- Resumen por período ---------- */
+.tab-summary svg { width: 16px; height: 16px; }
+.period-controls { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px 20px; padding: 14px 16px; margin-bottom: 16px; }
+.period-dates { display: flex; gap: 12px; }
+.period-dates .field input { width: 170px; }
+.period-presets { display: flex; flex-wrap: wrap; gap: 6px; flex: 1; }
+.chip {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-2);
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.chip:hover { border-color: var(--primary); color: var(--primary); }
+.chip:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.segmented-sm .seg { padding: 6px 12px; font-size: 13px; }
+.stats-5 { grid-template-columns: repeat(5, 1fr); }
+.period-error { margin: 0 2px 16px; }
+.post-link { text-decoration: none; font-size: 14px; text-align: left; }
+.post-link:hover { text-decoration: underline; }
+.row-empty td { color: var(--text-muted); }
+.weeks tfoot th, .weeks tfoot td { font-weight: 700; background: var(--surface-2); border-top: 1px solid var(--border); border-bottom: none; }
+.weeks tfoot th:first-child { background: var(--surface-2); }
+
 /* ---------- Gráficos ---------- */
 .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .chart-card { padding-bottom: 12px; min-width: 0; }
@@ -452,6 +480,7 @@ table.weeks { width: 100%; border-collapse: separate; border-spacing: 0; font-si
 /* ---------- Responsive ---------- */
 @media (max-width: 900px) {
   .stats { grid-template-columns: repeat(2, 1fr); }
+  .stats-5 > :last-child { grid-column: 1 / -1; }
   .charts { grid-template-columns: 1fr; }
 }
 
@@ -465,6 +494,9 @@ table.weeks { width: 100%; border-collapse: separate; border-spacing: 0; font-si
   .post-tabs-wrap #btn-add-post { margin-bottom: 0; align-self: flex-start; }
   .post-head > .btn-primary { width: 100%; height: 46px; }
   .post-title h2 { font-size: 19px; }
+  .period-dates { width: 100%; }
+  .period-dates .field { flex: 1; min-width: 0; }
+  .period-dates .field input { width: 100%; }
   .stat { padding: 12px; }
   .stat-value { font-size: 20px; }
   .weeks th, .weeks td { padding: 9px 10px; }
