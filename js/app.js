@@ -1,54 +1,67 @@
 /*
  * Kanshi · interfaz de usuario.
- * Depende de: KanshiStorage (storage.js), KanshiCalc (calc.js), Chart.js y SheetJS.
+ * Depende de: KanshiBackend (storage.js), KanshiCalc (calc.js), Chart.js y SheetJS.
  */
 (function () {
   'use strict';
 
   const SCHEMA_VERSION = 1;
   const SUMMARY_TAB = '__resumen__';
+  const UI_KEY = 'kanshi:ui:v1';
+  const UPLOADED_KEY = 'kanshi:subido';
+  const BANNER_HIDDEN_KEY = 'kanshi:aviso-subida-oculto';
   const $ = (sel) => document.querySelector(sel);
+  const B = window.KanshiBackend;
 
   let state = null;
   let charts = [];
+  let session = null;
+  let role = 'editor';        // en modo local siempre es editor
+  let lastReload = 0;
+
+  const isCloud = () => B.mode === 'supabase';
+  const canEdit = () => role === 'editor';
 
   // ---------- Estado ----------
 
+  // Los ids son UUID porque así los guarda la base de datos.
   function uid() {
-    if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
-    return Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+    if (crypto.randomUUID) return crypto.randomUUID();
+    const b = crypto.getRandomValues(new Uint8Array(16));
+    b[6] = (b[6] & 15) | 64;
+    b[8] = (b[8] & 63) | 128;
+    const h = [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
+    return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
   }
+
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const validId = (id) => (typeof id === 'string' && UUID_RE.test(id) ? id : uid());
 
   function defaultUi() {
     return { accountId: null, postByAccount: {}, newestFirst: true, period: { from: null, to: null, scope: 'account' } };
   }
 
-  function defaultState() {
-    return {
-      version: SCHEMA_VERSION,
-      accounts: [
-        { id: uid(), name: 'Cuenta 1', posts: [] },
-        { id: uid(), name: 'Cuenta 2', posts: [] },
-      ],
-      ui: defaultUi(),
-    };
+  function defaultAccounts() {
+    return [
+      { id: uid(), name: 'Cuenta 1', posts: [] },
+      { id: uid(), name: 'Cuenta 2', posts: [] },
+    ];
   }
 
-  // Valida y completa un estado (cargado o restaurado). Lanza error si no sirve.
-  function normalizeState(raw) {
+  // Valida y completa los datos (cargados, restaurados o subidos). Lanza error si no sirven.
+  function normalizeData(raw) {
     if (!raw || !Array.isArray(raw.accounts)) throw new Error('El archivo no tiene el formato de Kanshi.');
     const s = {
-      version: SCHEMA_VERSION,
       accounts: raw.accounts.map((a, i) => ({
-        id: a.id || uid(),
+        id: validId(a.id),
         name: String(a.name || `Cuenta ${i + 1}`),
         posts: (Array.isArray(a.posts) ? a.posts : []).map((p) => ({
-          id: p.id || uid(),
+          id: validId(p.id),
           name: String(p.name || 'Publicación'),
           createdAt: p.createdAt || Date.now(),
           firstIsBaseline: !!p.firstIsBaseline,
-          weeks: (Array.isArray(p.weeks) ? p.weeks : []).map((w) => ({
-            id: w.id || uid(),
+          weeks: (Array.isArray(p.weeks) ? p.weeks : []).filter((w) => /^\d{4}-\d{2}-\d{2}$/.test(w.date)).map((w) => ({
+            id: validId(w.id),
             date: String(w.date || ''),
             views: Number(w.views) || 0,
             clicks: Number(w.clicks) || 0,
@@ -58,22 +71,64 @@
           })),
         })),
       })),
-      ui: Object.assign(defaultUi(), raw.ui || {}),
     };
-    if (!s.accounts.length) s.accounts = defaultState().accounts;
     return s;
   }
 
-  async function persist() {
+  // Preferencias de pantalla (solapa abierta, período, orden): sólo en este dispositivo.
+  function loadUi() {
     try {
-      await KanshiStorage.save(state);
-      const time = new Date().toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' });
-      const where = KanshiStorage.name === 'supabase' ? 'Sincronizado con Supabase' : 'Datos guardados en este navegador';
-      $('#storage-status').textContent = `${where} · último guardado ${time}`;
+      return JSON.parse(localStorage.getItem(UI_KEY));
+    } catch (err) {
+      return null;
+    }
+  }
+
+  function saveUi() {
+    try {
+      localStorage.setItem(UI_KEY, JSON.stringify(state.ui));
+    } catch (err) {
+      /* sin almacenamiento: las preferencias no se recuerdan */
+    }
+  }
+
+  function setStatus(text) {
+    const time = new Date().toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' });
+    $('#storage-status').textContent = `${text} · ${time}`;
+  }
+
+  // Guarda un cambio de datos. Devuelve true si se guardó.
+  async function commit(op) {
+    try {
+      await B.apply(op, state);
+      setStatus(isCloud() ? 'Guardado en la nube' : 'Datos guardados en este navegador');
+      return true;
     } catch (err) {
       console.error(err);
-      toast('No se pudieron guardar los datos. Descargá una copia de seguridad.', 'error');
+      toast(errorMessage(err, 'No se pudo guardar el cambio.'), 'error');
+      // Volvemos a lo que realmente quedó guardado.
+      if (isCloud()) await reloadData();
+      return false;
     }
+  }
+
+  // Error de validación con un mensaje listo para mostrar.
+  const userError = (text) => Object.assign(new Error(text), { userMessage: text });
+
+  function errorMessage(err, fallback) {
+    if (err && err.userMessage) return err.userMessage;
+    const msg = String((err && (err.message || err.error_description)) || err || '');
+    const code = err && err.code;
+    if (/Invalid login credentials/i.test(msg)) return 'Email o contraseña incorrectos.';
+    if (/Email not confirmed/i.test(msg)) return 'Tu email todavía no está confirmado. Usá el link del email de invitación.';
+    if (code === '42501' || /row-level security|permission denied|Sólo un editor/i.test(msg)) return 'No tenés permiso para modificar datos: tu usuario es lector.';
+    if (/Failed to fetch|NetworkError|Load failed/i.test(msg)) return 'No hay conexión con la nube. Revisá tu internet y probá de nuevo.';
+    if (/Password should be at least|weak password/i.test(msg)) return 'La contraseña es muy corta o débil. Probá con una más larga.';
+    if (/should be different/i.test(msg)) return 'La contraseña nueva tiene que ser distinta de la anterior.';
+    if (/rate limit|For security purposes|too many/i.test(msg)) return 'Demasiados intentos. Esperá un minuto y probá de nuevo.';
+    if (/does not exist|Could not find the (table|function)|schema cache/i.test(msg)) return 'Falta preparar la base de datos: ejecutá supabase/schema.sql en Supabase (ver SUPABASE.md).';
+    if (/JWT|session/i.test(msg) && /expired|missing|invalid/i.test(msg)) return 'Tu sesión venció. Volvé a ingresar.';
+    return msg ? `${fallback} (${msg})` : fallback;
   }
 
   const currentAccount = () =>
@@ -139,6 +194,7 @@
   // ---------- Render ----------
 
   function render() {
+    document.body.classList.toggle('readonly', !canEdit());
     renderAccounts();
     renderPostTabs();
     renderPostView();
@@ -182,8 +238,9 @@
         <div class="empty card">
           <div class="empty-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7h16v13H4z M8 7V4h8v3 M9 12h6"/></svg></div>
           <h2>${esc(acc.name)} todavía no tiene publicaciones</h2>
-          <p>Creá una publicación (por ejemplo, “Zapatillas Negras”) para empezar a cargar sus números semanales.</p>
-          <button class="btn btn-primary" data-action="add-post">Crear publicación</button>
+          ${canEdit()
+            ? '<p>Creá una publicación (por ejemplo, “Zapatillas Negras”) para empezar a cargar sus números semanales.</p><button class="btn btn-primary" data-action="add-post" data-edit>Crear publicación</button>'
+            : '<p>Cuando el editor cargue publicaciones en esta cuenta, las vas a ver acá.</p>'}
         </div>`;
       return;
     }
@@ -197,15 +254,15 @@
         <div class="post-title">
           <h2>${esc(post.name)}</h2>
           <div class="post-title-actions">
-            <button class="icon-btn" data-action="rename-post" title="Renombrar publicación" aria-label="Renombrar publicación">
+            <button class="icon-btn" data-action="rename-post" data-edit title="Renombrar publicación" aria-label="Renombrar publicación">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16z M14 6l4 4"/></svg>
             </button>
-            <button class="icon-btn danger" data-action="delete-post" title="Eliminar publicación" aria-label="Eliminar publicación">
+            <button class="icon-btn danger" data-action="delete-post" data-edit title="Eliminar publicación" aria-label="Eliminar publicación">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16 M9 7V4h6v3 M6 7l1 13h10l1-13"/></svg>
             </button>
           </div>
         </div>
-        <button class="btn btn-primary" data-action="add-week">
+        <button class="btn btn-primary" data-action="add-week" data-edit>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14 M5 12h14"/></svg>
           Cargar semana
         </button>
@@ -247,9 +304,11 @@
     return `
       <div class="empty card">
         <div class="empty-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 5h16v15H4z M4 10h16 M9 3v4 M15 3v4"/></svg></div>
-        <h2>Cargá tu primera semana</h2>
+        ${canEdit()
+          ? `<h2>Cargá tu primera semana</h2>
         <p>Copiá las vistas, clicks y ventas <strong>acumuladas</strong> tal como aparecen en Mercado Libre. Desde la segunda semana, Kanshi calcula sola lo que pasó en cada semana.</p>
-        <button class="btn btn-primary" data-action="add-week">Cargar semana</button>
+        <button class="btn btn-primary" data-action="add-week" data-edit>Cargar semana</button>`
+          : '<h2>Todavía no hay semanas cargadas</h2><p>Cuando el editor cargue datos de esta publicación, los vas a ver acá.</p>'}
       </div>`;
   }
 
@@ -277,7 +336,7 @@
           ${cell(fmtMoney(r.price), r.change.price, r.isBaseline)}
           ${cell(fmtMoney(r.revenue), r.change.revenue, r.isBaseline)}
           ${cell(fmtConv(r.conversion), r.change.conversion, r.isBaseline)}
-          <td class="row-actions">
+          <td class="row-actions" data-edit>
             <button class="icon-btn" data-action="edit-week" data-week="${r.id}" title="Editar semana" aria-label="Editar semana ${r.number}">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16z M14 6l4 4"/></svg>
             </button>
@@ -310,7 +369,7 @@
                 <th scope="col" class="num">Precio</th>
                 <th scope="col" class="num">Facturación</th>
                 <th scope="col" class="num">Conversión</th>
-                <th scope="col"><span class="sr-only">Acciones</span></th>
+                <th scope="col" data-edit><span class="sr-only">Acciones</span></th>
               </tr>
             </thead>
             <tbody>${body}</tbody>
@@ -321,7 +380,7 @@
           <p>${post.firstIsBaseline
             ? 'La <strong>Semana 1</strong> se usa sólo como punto de partida (la publicación ya tenía vistas y ventas antes).'
             : 'La <strong>Semana 1</strong> muestra los acumulados cargados, como si la publicación hubiera empezado esa semana.'}
-            <button class="link-btn" data-action="toggle-baseline">${post.firstIsBaseline ? 'Contar la Semana 1 como una semana normal' : 'Usarla sólo como punto de partida'}</button>
+            <button class="link-btn" data-action="toggle-baseline" data-edit>${post.firstIsBaseline ? 'Contar la Semana 1 como una semana normal' : 'Usarla sólo como punto de partida'}</button>
           </p>
         </div>
       </section>`;
@@ -735,18 +794,28 @@
         }
         if (data.clicks > data.views) return fail('Los clicks no pueden ser más que las vistas.');
 
+        const ops = [];
         if (!b.querySelector('#baseline-field').hidden) {
-          post.firstIsBaseline = b.querySelector('[name=firstIsBaseline]').checked;
+          const baseline = b.querySelector('[name=firstIsBaseline]').checked;
+          if (baseline !== !!post.firstIsBaseline) {
+            post.firstIsBaseline = baseline;
+            ops.push({ type: 'updatePost', id: post.id, fields: { firstIsBaseline: baseline } });
+          }
         }
         if (week) {
           Object.assign(week, { date }, data);
+          ops.push({ type: 'updateWeek', id: week.id, fields: Object.assign({ date }, data) });
         } else {
-          post.weeks.push(Object.assign({ id: uid(), date, createdAt: Date.now() }, data));
+          const added = Object.assign({ id: uid(), date, createdAt: Date.now() }, data);
+          post.weeks.push(added);
+          ops.push({ type: 'addWeek', postId: post.id, week: added });
         }
-        persist();
         renderPostTabs();
         renderPostView();
-        toast(week ? 'Semana actualizada' : 'Semana cargada');
+        (async () => {
+          for (const op of ops) if (!(await commit(op))) return;
+          toast(week ? 'Semana actualizada' : 'Semana cargada');
+        })();
       },
     });
   }
@@ -783,14 +852,16 @@
   // ---------- Acciones ----------
 
   async function addPost() {
+    if (!canEdit()) return;
     const name = await promptName({ title: 'Nueva publicación', label: 'Nombre de la publicación', confirm: 'Crear' });
     if (!name) return;
     const acc = currentAccount();
-    const post = { id: uid(), name, createdAt: Date.now(), weeks: [] };
+    const post = { id: uid(), name, createdAt: Date.now(), firstIsBaseline: false, weeks: [] };
     acc.posts.push(post);
     state.ui.postByAccount[acc.id] = post.id;
-    persist();
+    saveUi();
     render();
+    commit({ type: 'addPost', accountId: acc.id, post });
   }
 
   async function renamePost() {
@@ -798,8 +869,8 @@
     const name = await promptName({ title: 'Renombrar publicación', label: 'Nombre', value: post.name });
     if (!name) return;
     post.name = name;
-    persist();
     render();
+    commit({ type: 'updatePost', id: post.id, fields: { name } });
   }
 
   async function deletePost() {
@@ -816,18 +887,19 @@
     acc.posts.splice(idx, 1);
     const neighbor = acc.posts[idx] || acc.posts[idx - 1];
     state.ui.postByAccount[acc.id] = neighbor ? neighbor.id : null;
-    persist();
+    saveUi();
     render();
-    toast('Publicación eliminada');
+    if (await commit({ type: 'deletePost', id: post.id })) toast('Publicación eliminada');
   }
 
   async function renameAccount() {
+    if (!canEdit()) return;
     const acc = currentAccount();
     const name = await promptName({ title: 'Renombrar cuenta', label: 'Nombre de la cuenta', value: acc.name });
     if (!name) return;
     acc.name = name;
-    persist();
     render();
+    commit({ type: 'renameAccount', id: acc.id, name });
   }
 
   async function deleteWeek(weekId) {
@@ -840,10 +912,9 @@
     });
     if (!ok) return;
     post.weeks = post.weeks.filter((w) => w.id !== weekId);
-    persist();
     renderPostTabs();
     renderPostView();
-    toast('Semana borrada');
+    if (await commit({ type: 'deleteWeek', id: weekId })) toast('Semana borrada');
   }
 
   // ---------- Respaldo y Excel ----------
@@ -860,16 +931,18 @@
   }
 
   function backup() {
-    const payload = { app: 'kanshi', version: SCHEMA_VERSION, exportedAt: new Date().toISOString(), data: state };
+    const payload = { app: 'kanshi', version: SCHEMA_VERSION, exportedAt: new Date().toISOString(), data: { accounts: state.accounts } };
     download(`kanshi-respaldo-${todayISO()}.json`, new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }));
     toast('Copia de seguridad descargada');
   }
 
   async function restore(file) {
+    if (!canEdit()) return;
     let next;
     try {
       const json = JSON.parse(await file.text());
-      next = normalizeState(json.data || json);
+      next = normalizeData(json.data || json);
+      if (!next.accounts.length) throw new Error('La copia de seguridad no tiene cuentas.');
     } catch (err) {
       toast(err instanceof SyntaxError ? 'El archivo no es una copia de seguridad válida.' : err.message, 'error');
       return;
@@ -881,10 +954,86 @@
       confirm: 'Restaurar',
     });
     if (!ok) return;
-    state = next;
-    persist();
+    state.accounts = next.accounts;
+    fixUiSelection();
     render();
-    toast('Datos restaurados');
+    if (await commit({ type: 'replaceAll' })) toast(isCloud() ? 'Datos restaurados en la nube' : 'Datos restaurados');
+  }
+
+  // ---------- Subir a la nube los datos de este navegador ----------
+
+  function localDataToUpload() {
+    if (!isCloud() || !canEdit()) return null;
+    const raw = B.readLocal();
+    if (!raw) return null;
+    try {
+      const data = normalizeData(raw);
+      return data.accounts.some((a) => a.posts.length) ? data : null;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  function updateUploadUi() {
+    const local = localDataToUpload();
+    $('#btn-upload-local').hidden = !local;
+    let hidden = true;
+    try {
+      hidden = !local || !!localStorage.getItem(UPLOADED_KEY) || !!localStorage.getItem(BANNER_HIDDEN_KEY);
+    } catch (err) { /* sin almacenamiento */ }
+    $('#upload-banner').hidden = hidden;
+  }
+
+  async function uploadLocal() {
+    const local = localDataToUpload();
+    if (!local) return;
+    const nPosts = local.accounts.reduce((n, a) => n + a.posts.length, 0);
+    const nWeeks = local.accounts.reduce((n, a) => n + a.posts.reduce((m, p) => m + p.weeks.length, 0), 0);
+    let uploadedAt = null;
+    try { uploadedAt = localStorage.getItem(UPLOADED_KEY); } catch (err) { /* nada */ }
+
+    // Cada cuenta local se suma a la cuenta de la nube en la misma posición.
+    const mapping = local.accounts
+      .filter((a) => a.posts.length)
+      .map((a) => {
+        const i = local.accounts.indexOf(a);
+        const target = state.accounts[i];
+        return `<li><strong>${esc(a.name)}</strong> (${a.posts.length} publicaci${a.posts.length === 1 ? 'ón' : 'ones'}) → ${target ? esc(target.name) : 'una cuenta nueva'}</li>`;
+      })
+      .join('');
+    const ok = await confirmDanger({
+      title: 'Subir datos de este navegador',
+      message: `Se van a <strong>agregar</strong> ${nPosts} publicaci${nPosts === 1 ? 'ón' : 'ones'} y ${nWeeks} semana${nWeeks === 1 ? '' : 's'} a los datos de la nube. No se borra nada de lo que ya está en la nube.<ul class="dialog-list">${mapping}</ul>${uploadedAt ? `<span class="prev-warn">⚠ Ya subiste estos datos el ${new Date(Number(uploadedAt)).toLocaleDateString('es-AR')}. Si los volvés a subir, las publicaciones van a quedar repetidas.</span>` : ''}`,
+      confirm: 'Subir a la nube',
+    });
+    if (!ok) return;
+
+    const before = JSON.stringify(state.accounts);
+    local.accounts.forEach((la, i) => {
+      if (!la.posts.length) return;
+      let target = state.accounts[i];
+      if (!target) {
+        target = { id: uid(), name: la.name, posts: [] };
+        state.accounts.push(target);
+      } else if (/^Cuenta \d+$/.test(target.name) && !/^Cuenta \d+$/.test(la.name)) {
+        target.name = la.name;
+      }
+      la.posts.forEach((p) => {
+        target.posts.push(Object.assign({}, p, {
+          id: uid(),
+          weeks: p.weeks.map((w) => Object.assign({}, w, { id: uid() })),
+        }));
+      });
+    });
+    render();
+    if (await commit({ type: 'replaceAll' })) {
+      try { localStorage.setItem(UPLOADED_KEY, String(Date.now())); } catch (err) { /* nada */ }
+      updateUploadUi();
+      toast('Datos subidos a la nube');
+    } else if (!isCloud()) {
+      state.accounts = JSON.parse(before);
+      render();
+    }
   }
 
   function exportExcel() {
@@ -969,7 +1118,7 @@
       const b = e.target.closest('[data-account]');
       if (!b) return;
       state.ui.accountId = b.dataset.account;
-      persist();
+      saveUi();
       render();
     });
 
@@ -977,7 +1126,7 @@
       const b = e.target.closest('[data-post]');
       if (!b) return;
       state.ui.postByAccount[currentAccount().id] = b.dataset.post;
-      persist();
+      saveUi();
       renderPostTabs();
       renderPostView();
     });
@@ -988,6 +1137,7 @@
     $('#post-view').addEventListener('click', (e) => {
       const b = e.target.closest('[data-action]');
       if (!b) return;
+      if (b.hasAttribute('data-edit') && !canEdit()) return;
       const post = currentPost();
       switch (b.dataset.action) {
         case 'add-post': return addPost();
@@ -998,24 +1148,24 @@
         case 'delete-week': return deleteWeek(b.dataset.week);
         case 'period-preset':
           Object.assign(state.ui.period, periodPreset(b.dataset.preset));
-          persist();
+          saveUi();
           return renderPostView();
         case 'period-scope':
           state.ui.period.scope = b.dataset.scope;
-          persist();
+          saveUi();
           return renderPostView();
         case 'open-post':
           state.ui.accountId = b.dataset.account;
           state.ui.postByAccount[b.dataset.account] = b.dataset.post;
-          persist();
+          saveUi();
           return render();
         case 'toggle-baseline':
           post.firstIsBaseline = !post.firstIsBaseline;
-          persist();
-          return renderPostView();
+          renderPostView();
+          return commit({ type: 'updatePost', id: post.id, fields: { firstIsBaseline: post.firstIsBaseline } });
         case 'toggle-order':
           state.ui.newestFirst = !state.ui.newestFirst;
-          persist();
+          saveUi();
           return renderPostView();
       }
     });
@@ -1024,20 +1174,44 @@
       const field = e.target.dataset.period;
       if (!field || !e.target.value) return;
       state.ui.period[field] = e.target.value;
-      persist();
+      saveUi();
       renderPostView();
     });
 
-    // Menú de respaldo
-    const menuBtn = $('#btn-data-menu');
-    const menu = $('#data-menu');
-    const setMenu = (open) => { menu.hidden = !open; menuBtn.setAttribute('aria-expanded', String(open)); };
-    menuBtn.addEventListener('click', (e) => { e.stopPropagation(); setMenu(menu.hidden); });
-    document.addEventListener('click', (e) => { if (!menu.contains(e.target)) setMenu(false); });
-    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') setMenu(false); });
+    // Menús desplegables (respaldo y usuario)
+    const menus = [['#btn-data-menu', '#data-menu'], ['#btn-user-menu', '#user-menu']].map(([btnSel, panelSel]) => {
+      const btn = $(btnSel);
+      const panel = $(panelSel);
+      const set = (open) => { panel.hidden = !open; btn.setAttribute('aria-expanded', String(open)); };
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const open = panel.hidden;
+        closeMenus();
+        set(open);
+      });
+      return { panel, set };
+    });
+    const closeMenus = () => menus.forEach((m) => m.set(false));
+    document.addEventListener('click', (e) => { menus.forEach((m) => { if (!m.panel.contains(e.target)) m.set(false); }); });
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeMenus(); });
 
-    $('#btn-backup').addEventListener('click', () => { setMenu(false); backup(); });
-    $('#btn-restore').addEventListener('click', () => { setMenu(false); $('#file-restore').click(); });
+    $('#btn-backup').addEventListener('click', () => { closeMenus(); backup(); });
+    $('#btn-restore').addEventListener('click', () => { closeMenus(); if (canEdit()) $('#file-restore').click(); });
+    $('#btn-upload-local').addEventListener('click', () => { closeMenus(); uploadLocal(); });
+    $('#btn-upload-banner').addEventListener('click', uploadLocal);
+    $('#btn-upload-dismiss').addEventListener('click', () => {
+      try { localStorage.setItem(BANNER_HIDDEN_KEY, '1'); } catch (err) { /* nada */ }
+      updateUploadUi();
+    });
+    $('#btn-sign-out').addEventListener('click', () => { closeMenus(); B.signOut(); });
+    $('#btn-change-password').addEventListener('click', () => { closeMenus(); changePasswordDialog(); });
+
+    // Al volver a la app (por ejemplo, desde otra pestaña o el celular), traer los datos nuevos.
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState !== 'visible' || !isCloud() || !session || dialog.open) return;
+      if (Date.now() - lastReload < 30000) return;
+      reloadData();
+    });
     $('#file-restore').addEventListener('change', (e) => {
       const f = e.target.files[0];
       e.target.value = '';
@@ -1049,20 +1223,253 @@
     window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => renderPostView());
   }
 
+  // ---------- Carga de datos ----------
+
+  function fixUiSelection() {
+    if (!state.accounts.some((a) => a.id === state.ui.accountId)) state.ui.accountId = state.accounts[0].id;
+  }
+
+  async function loadData() {
+    const saved = await B.load();
+    const data = saved ? normalizeData(saved) : { accounts: [] };
+    const ui = Object.assign(defaultUi(), loadUi() || (saved && saved.ui) || {});
+    state = { accounts: data.accounts, ui };
+    if (!state.accounts.length) {
+      state.accounts = defaultAccounts();
+      // Base de datos vacía: el editor crea las dos cuentas iniciales.
+      if (canEdit()) await B.apply({ type: 'replaceAll' }, state);
+    }
+    fixUiSelection();
+    lastReload = Date.now();
+  }
+
+  async function reloadData() {
+    try {
+      await loadData();
+      render();
+      updateUploadUi();
+      setStatus(isCloud() ? 'Datos de la nube actualizados' : 'Datos guardados en este navegador');
+    } catch (err) {
+      console.error(err);
+      toast(errorMessage(err, 'No se pudieron leer los datos.'), 'error');
+    }
+  }
+
+  // ---------- Pantallas: cargando / ingreso / app ----------
+
+  function showLoading(text = 'Cargando…') {
+    $('#loading').textContent = text;
+    $('#loading').hidden = false;
+    $('#auth-view').hidden = true;
+    $('#app-view').hidden = true;
+  }
+
+  function showApp() {
+    $('#loading').hidden = true;
+    $('#auth-view').hidden = true;
+    $('#app-view').hidden = false;
+
+    const userWrap = $('#user-menu-wrap');
+    userWrap.hidden = !isCloud();
+    if (isCloud() && session) {
+      const email = session.user.email || '';
+      $('#user-email').textContent = email;
+      $('#user-avatar').textContent = (email[0] || '?').toUpperCase();
+      $('#user-role').textContent = canEdit() ? 'Editor' : 'Lector';
+      $('#user-role').className = `role-badge ${canEdit() ? 'role-editor' : 'role-reader'}`;
+      $('#user-role-text').textContent = canEdit()
+        ? 'Editor: podés cargar, editar y borrar datos.'
+        : 'Lector: podés ver los datos, pero no modificarlos.';
+    }
+    render();
+    updateUploadUi();
+    setStatus(isCloud() ? 'Datos en la nube' : 'Datos guardados en este navegador (modo local)');
+  }
+
+  // view: 'login' | 'forgot' | 'set-password' | 'unavailable'
+  function showAuth(view, notice) {
+    $('#loading').hidden = true;
+    $('#app-view').hidden = true;
+    $('#auth-view').hidden = false;
+    destroyCharts();
+    const body = $('#auth-body');
+    const noticeHtml = notice ? `<p class="auth-notice ${notice.type === 'error' ? 'auth-notice-error' : ''}">${esc(notice.text)}</p>` : '';
+
+    if (view === 'unavailable') {
+      body.innerHTML = B.reason === 'secret-key'
+        ? `<h2>Configuración insegura</h2>
+           <p class="auth-text">En <code>js/config.js</code> hay una clave <strong>secreta</strong> de Supabase. Esa clave da acceso total y no puede estar en una página pública.</p>
+           <p class="auth-text">Reemplazala por la clave <strong>publishable</strong> (o “anon”) y, por seguridad, generá una clave secreta nueva en Supabase (Project Settings → API Keys).</p>`
+        : `<h2>No se pudo conectar</h2>
+           <p class="auth-text">No se pudo cargar la conexión con la nube. Revisá tu internet y recargá la página.</p>
+           <button class="btn btn-primary btn-block" onclick="location.reload()">Reintentar</button>`;
+      return;
+    }
+
+    if (view === 'login') {
+      body.innerHTML = `
+        <h2>Ingresar</h2>
+        ${noticeHtml}
+        <form id="login-form" class="auth-form" novalidate>
+          <label class="field"><span>Email</span><input type="email" name="email" autocomplete="username" required /></label>
+          <label class="field"><span>Contraseña</span><input type="password" name="password" autocomplete="current-password" required /></label>
+          <p class="form-error" hidden></p>
+          <button type="submit" class="btn btn-primary btn-block">Ingresar</button>
+        </form>
+        <button class="link-btn auth-link" data-auth="forgot">¿Olvidaste tu contraseña?</button>
+        <p class="auth-foot">Sólo pueden entrar las personas invitadas por el administrador.</p>`;
+      bindAuthForm('#login-form', async (f) => {
+        const email = f.email.value.trim();
+        if (!email || !f.password.value) throw userError('Completá tu email y tu contraseña.');
+        await B.signIn(email, f.password.value);
+        session = await B.getSession();
+        await startSession();
+      });
+    } else if (view === 'forgot') {
+      body.innerHTML = `
+        <h2>Recuperar contraseña</h2>
+        <p class="auth-text">Escribí tu email y te mandamos un link para elegir una contraseña nueva.</p>
+        <form id="forgot-form" class="auth-form" novalidate>
+          <label class="field"><span>Email</span><input type="email" name="email" autocomplete="username" required /></label>
+          <p class="form-error" hidden></p>
+          <button type="submit" class="btn btn-primary btn-block">Enviar link</button>
+        </form>
+        <button class="link-btn auth-link" data-auth="login">Volver a ingresar</button>`;
+      bindAuthForm('#forgot-form', async (f) => {
+        const email = f.email.value.trim();
+        if (!email) throw userError('Escribí tu email.');
+        await B.sendPasswordReset(email);
+        showAuth('login', { text: 'Si ese email tiene acceso, te llegó un link para elegir una contraseña nueva. Revisá también la carpeta de spam.' });
+      });
+    } else if (view === 'set-password') {
+      body.innerHTML = `
+        <h2>Elegí tu contraseña</h2>
+        <p class="auth-text">${session && session.user.email ? `Usuario: <strong>${esc(session.user.email)}</strong>. ` : ''}La vas a usar para ingresar desde cualquier dispositivo.</p>
+        <form id="password-form" class="auth-form" novalidate>
+          <label class="field"><span>Contraseña nueva (mínimo 8 caracteres)</span><input type="password" name="password" autocomplete="new-password" required /></label>
+          <label class="field"><span>Repetila</span><input type="password" name="password2" autocomplete="new-password" required /></label>
+          <p class="form-error" hidden></p>
+          <button type="submit" class="btn btn-primary btn-block">Guardar y entrar</button>
+        </form>`;
+      bindAuthForm('#password-form', async (f) => {
+        const pw = f.password.value;
+        if (pw.length < 8) throw userError('La contraseña tiene que tener al menos 8 caracteres.');
+        if (pw !== f.password2.value) throw userError('Las dos contraseñas no coinciden.');
+        await B.updatePassword(pw);
+        history.replaceState(null, '', location.pathname);
+        await startSession();
+        toast('Contraseña guardada');
+      });
+    }
+    body.querySelectorAll('[data-auth]').forEach((b) => b.addEventListener('click', () => showAuth(b.dataset.auth)));
+    const first = body.querySelector('input');
+    if (first) first.focus();
+  }
+
+  function bindAuthForm(sel, handler) {
+    const form = $(sel);
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const err = form.querySelector('.form-error');
+      const btn = form.querySelector('[type=submit]');
+      err.hidden = true;
+      btn.disabled = true;
+      try {
+        await handler(form.elements);
+      } catch (ex) {
+        if (!ex.userMessage) console.error(ex);
+        err.textContent = errorMessage(ex, 'Algo salió mal.');
+        err.hidden = false;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  }
+
+  function changePasswordDialog() {
+    openDialog({
+      title: 'Cambiar contraseña',
+      body: `
+        <label class="field"><span>Contraseña nueva (mínimo 8 caracteres)</span><input type="password" name="password" autocomplete="new-password" /></label>
+        <label class="field"><span>Repetila</span><input type="password" name="password2" autocomplete="new-password" /></label>
+        <p class="form-error" id="form-error" hidden></p>`,
+      actions: [{ label: 'Cancelar' }, { label: 'Guardar', submit: true, className: 'btn-primary' }],
+      onSubmit: (b) => {
+        const pw = b.querySelector('[name=password]').value;
+        const err = b.querySelector('#form-error');
+        const fail = (msg) => { err.textContent = msg; err.hidden = false; return false; };
+        if (pw.length < 8) return fail('La contraseña tiene que tener al menos 8 caracteres.');
+        if (pw !== b.querySelector('[name=password2]').value) return fail('Las dos contraseñas no coinciden.');
+        B.updatePassword(pw)
+          .then(() => toast('Contraseña actualizada'))
+          .catch((ex) => toast(errorMessage(ex, 'No se pudo cambiar la contraseña.'), 'error'));
+      },
+    });
+  }
+
+  async function startSession() {
+    showLoading();
+    try {
+      role = await B.getRole(session.user.id);
+      await loadData();
+    } catch (err) {
+      console.error(err);
+      showAuth('login', { type: 'error', text: errorMessage(err, 'No se pudieron leer los datos.') });
+      return;
+    }
+    showApp();
+  }
+
   // ---------- Inicio ----------
 
   async function init() {
     bindEvents();
+
+    if (B.mode === 'unavailable') return showAuth('unavailable');
+
+    if (B.mode === 'local') {
+      try {
+        await loadData();
+      } catch (err) {
+        console.error(err);
+        state = { accounts: defaultAccounts(), ui: defaultUi() };
+        fixUiSelection();
+        toast('No se pudieron leer los datos guardados.', 'error');
+      }
+      return showApp();
+    }
+
+    // Modo Supabase
+    B.onAuthChange((event, s) => {
+      // Fuera del callback: Supabase no permite otras llamadas adentro.
+      setTimeout(() => {
+        if (event === 'SIGNED_OUT') {
+          session = null;
+          state = null;
+          showAuth('login');
+        } else if (event === 'PASSWORD_RECOVERY') {
+          session = s;
+          showAuth('set-password');
+        } else if (s) {
+          session = s;
+        }
+      }, 0);
+    });
+
     try {
-      const saved = await KanshiStorage.load();
-      state = saved ? normalizeState(saved) : defaultState();
+      session = await B.getSession();
     } catch (err) {
       console.error(err);
-      state = defaultState();
-      toast('No se pudieron leer los datos guardados.', 'error');
+      session = null;
     }
-    if (!state.ui.accountId) state.ui.accountId = state.accounts[0].id;
-    render();
+    if (!session) {
+      const linkError = B.initialLinkError;
+      return showAuth('login', linkError
+        ? { type: 'error', text: 'El link del email venció o ya se usó. Pedí una invitación nueva o tocá “¿Olvidaste tu contraseña?”.' }
+        : null);
+    }
+    if (B.initialLinkType === 'invite' || B.initialLinkType === 'recovery') return showAuth('set-password');
+    await startSession();
   }
 
   init();

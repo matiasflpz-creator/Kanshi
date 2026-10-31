@@ -10,9 +10,28 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="css/styles.css" />
+  <link rel="stylesheet" href="css/styles.css?v=4" />
 </head>
 <body>
+  <!-- Pantalla de ingreso (sólo con Supabase) -->
+  <section class="auth-view" id="auth-view" hidden>
+    <div class="auth-card card">
+      <div class="brand auth-brand">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 32 32"><rect width="32" height="32" rx="8" /><path d="M8 22l5-6 4 3 7-9" /></svg>
+        </span>
+        <div>
+          <h1>Kanshi</h1>
+          <p class="brand-sub">Seguimiento semanal · Mercado Libre</p>
+        </div>
+      </div>
+      <div id="auth-body"></div>
+    </div>
+  </section>
+
+  <div class="loading" id="loading" role="status">Cargando…</div>
+
+  <div id="app-view" hidden>
   <header class="topbar">
     <div class="brand">
       <span class="brand-mark" aria-hidden="true">
@@ -35,8 +54,24 @@
         </button>
         <div class="menu-panel" id="data-menu" hidden>
           <button class="menu-item" id="btn-backup">Descargar copia de seguridad</button>
-          <button class="menu-item" id="btn-restore">Restaurar copia de seguridad…</button>
+          <button class="menu-item" id="btn-restore" data-edit>Restaurar copia de seguridad…</button>
+          <button class="menu-item" id="btn-upload-local" data-edit hidden>Subir a la nube los datos de este navegador…</button>
           <input type="file" id="file-restore" accept="application/json,.json" hidden />
+        </div>
+      </div>
+      <div class="menu" id="user-menu-wrap" hidden>
+        <button class="btn btn-ghost user-btn" id="btn-user-menu" aria-haspopup="true" aria-expanded="false" title="Tu usuario">
+          <span class="avatar" id="user-avatar" aria-hidden="true"></span>
+          <span class="role-badge" id="user-role"></span>
+        </button>
+        <div class="menu-panel" id="user-menu" hidden>
+          <div class="menu-info">
+            <span class="menu-info-label">Conectado como</span>
+            <strong id="user-email"></strong>
+            <span class="muted" id="user-role-text"></span>
+          </div>
+          <button class="menu-item" id="btn-change-password">Cambiar contraseña</button>
+          <button class="menu-item" id="btn-sign-out">Cerrar sesión</button>
         </div>
       </div>
     </div>
@@ -46,7 +81,7 @@
     <!-- Cuentas -->
     <section class="accounts" aria-label="Cuentas">
       <div class="segmented" id="account-tabs" role="tablist"></div>
-      <button class="icon-btn" id="btn-rename-account" title="Renombrar cuenta" aria-label="Renombrar cuenta">
+      <button class="icon-btn" id="btn-rename-account" data-edit title="Renombrar cuenta" aria-label="Renombrar cuenta">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16z M14 6l4 4"/></svg>
       </button>
     </section>
@@ -54,18 +89,27 @@
     <!-- Publicaciones -->
     <nav class="post-tabs-wrap" aria-label="Publicaciones">
       <div class="post-tabs" id="post-tabs" role="tablist"></div>
-      <button class="btn btn-soft btn-sm" id="btn-add-post">
+      <button class="btn btn-soft btn-sm" id="btn-add-post" data-edit>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14 M5 12h14"/></svg>
         Nueva publicación
       </button>
     </nav>
 
+    <div class="banner" id="upload-banner" data-edit hidden>
+      <span>Encontramos datos guardados en este navegador que todavía no están en la nube.</span>
+      <button class="btn btn-primary btn-sm" id="btn-upload-banner">Subirlos a la nube</button>
+      <button class="icon-btn" id="btn-upload-dismiss" aria-label="Ocultar aviso" title="Ocultar">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12 M18 6L6 18"/></svg>
+      </button>
+    </div>
+
     <section id="post-view"></section>
   </main>
 
   <footer class="footer">
-    <span id="storage-status">Datos guardados en este navegador</span>
+    <span id="storage-status"></span>
   </footer>
+  </div>
 
   <!-- Diálogo genérico -->
   <dialog id="dialog" class="dialog">
@@ -85,9 +129,10 @@
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-  <script src="js/config.js"></script>
-  <script src="js/storage.js"></script>
-  <script src="js/calc.js"></script>
-  <script src="js/app.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/dist/umd/supabase.js"></script>
+  <script src="js/config.js?v=4"></script>
+  <script src="js/storage.js?v=4"></script>
+  <script src="js/calc.js?v=4"></script>
+  <script src="js/app.js?v=4"></script>
 </body>
 </html>
