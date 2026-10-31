@@ -14,6 +14,8 @@
  *   load(): Promise<{ accounts }>
  *   apply(op, data): Promise<void>   guarda un cambio (ver OPS más abajo)
  *   readLocal(): datos guardados en este navegador (o null)
+ *   loadFavorites(): Promise<string[]>   ids de las publicaciones favoritas del usuario
+ *   setFavorite(postId, on): Promise<void>
  *
  * Cada cambio se describe con un objeto `op`:
  *   { type: 'renameAccount', id, name }
@@ -27,6 +29,7 @@
  */
 (function () {
   const LOCAL_KEY = 'kanshi:estado:v1';
+  const LOCAL_FAVS_KEY = 'kanshi:favoritos';
 
   function readLocal() {
     try {
@@ -48,6 +51,19 @@
     },
     async apply(op, data) {
       localStorage.setItem(LOCAL_KEY, JSON.stringify({ version: 1, accounts: data.accounts }));
+    },
+    async loadFavorites() {
+      try {
+        return JSON.parse(localStorage.getItem(LOCAL_FAVS_KEY)) || [];
+      } catch (err) {
+        return [];
+      }
+    },
+    async setFavorite(postId, on) {
+      const favs = new Set(await this.loadFavorites());
+      if (on) favs.add(postId);
+      else favs.delete(postId);
+      localStorage.setItem(LOCAL_FAVS_KEY, JSON.stringify([...favs]));
     },
   };
 
@@ -155,6 +171,22 @@
           });
         });
         return { accounts };
+      },
+
+      // Favoritos: las políticas de la base sólo dejan ver y cambiar los propios,
+      // y sólo a editores. usuario_id lo completa la base con el usuario logueado.
+      async loadFavorites() {
+        const rows = await selectAll('favoritos', 'publicacion_id', ['creado']);
+        return rows.map((r) => r.publicacion_id);
+      },
+      async setFavorite(postId, on) {
+        if (on) {
+          const { error } = await db.from('favoritos').insert({ publicacion_id: postId });
+          // 23505 = ya estaba marcada (por ejemplo, desde otro dispositivo).
+          if (error && error.code !== '23505') throw error;
+        } else {
+          check(await db.from('favoritos').delete().eq('publicacion_id', postId));
+        }
       },
 
       async apply(op, data) {

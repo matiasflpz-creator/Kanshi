@@ -9,6 +9,7 @@
 --   cuentas         Cuenta 1, Cuenta 2…
 --   publicaciones   las publicaciones de cada cuenta
 --   semanas         los acumulados cargados cada semana
+--   favoritos       las publicaciones favoritas de cada editor
 --
 -- Seguridad (Row Level Security):
 --   - Sin login no se puede leer ni escribir nada.
@@ -17,6 +18,8 @@
 --   - Nadie puede cambiarse el rol desde la app: sólo desde el panel de
 --     Supabase (Table Editor o SQL Editor).
 --   - Todo usuario nuevo empieza como 'lector'.
+--   - Favoritos: cada editor ve, agrega y quita sólo los suyos. Los
+--     lectores no pueden usarlos.
 -- =====================================================================
 
 
@@ -100,6 +103,15 @@ create table if not exists public.semanas (
 );
 create index if not exists semanas_publicacion_idx on public.semanas (publicacion_id);
 
+-- Favoritos: una fila por (usuario, publicación).
+create table if not exists public.favoritos (
+  usuario_id     uuid not null default auth.uid() references auth.users (id) on delete cascade,
+  publicacion_id uuid not null references public.publicaciones (id) on delete cascade,
+  creado         timestamptz not null default now(),
+  primary key (usuario_id, publicacion_id)
+);
+create index if not exists favoritos_publicacion_idx on public.favoritos (publicacion_id);
+
 -- Las dos cuentas iniciales (sólo si todavía no hay ninguna).
 insert into public.cuentas (nombre, orden)
 select v.nombre, v.orden
@@ -113,6 +125,7 @@ alter table public.perfiles      enable row level security;
 alter table public.cuentas       enable row level security;
 alter table public.publicaciones enable row level security;
 alter table public.semanas       enable row level security;
+alter table public.favoritos     enable row level security;
 
 -- perfiles: cada uno ve el suyo; un editor ve todos. Sin políticas de
 -- insert/update/delete: nadie puede cambiar roles desde la app.
@@ -141,23 +154,43 @@ end;
 $$;
 
 
+-- favoritos: sólo los editores, y cada uno únicamente con sus propias filas.
+drop policy if exists "favoritos: ver" on public.favoritos;
+drop policy if exists "favoritos: agregar" on public.favoritos;
+drop policy if exists "favoritos: quitar" on public.favoritos;
+create policy "favoritos: ver" on public.favoritos
+  for select to authenticated
+  using (usuario_id = (select auth.uid()) and (select public.es_editor()));
+create policy "favoritos: agregar" on public.favoritos
+  for insert to authenticated
+  with check (usuario_id = (select auth.uid()) and (select public.es_editor()));
+create policy "favoritos: quitar" on public.favoritos
+  for delete to authenticated
+  using (usuario_id = (select auth.uid()) and (select public.es_editor()));
+
+
 -- ---------- Restaurar copia / subir datos del navegador ----------
 -- Reemplaza todos los datos por los del JSON recibido, en una sola
--- transacción (si algo falla, no se pierde nada). Corre con los permisos de
--- quien la llama, así que las políticas de arriba también se aplican.
+-- transacción (si algo falla, no se pierde nada). Sólo la puede usar un
+-- editor. Conserva los favoritos de todos los editores para las
+-- publicaciones que siguen existiendo.
 
 create or replace function public.reemplazar_todo(datos jsonb)
 returns void
 language plpgsql
-security invoker
+security definer
 set search_path = ''
 as $$
+declare
+  favs jsonb;
 begin
   if not public.es_editor() then
     raise exception 'Sólo un editor puede reemplazar los datos' using errcode = '42501';
   end if;
 
-  delete from public.cuentas where true;  -- borra también publicaciones y semanas (cascade)
+  select coalesce(jsonb_agg(to_jsonb(f)), '[]'::jsonb) into favs from public.favoritos f;
+
+  delete from public.cuentas where true;  -- borra también publicaciones, semanas y favoritos (cascade)
 
   insert into public.cuentas (id, nombre, orden)
   select (c.value ->> 'id')::uuid, c.value ->> 'name', c.ordinality
@@ -183,6 +216,12 @@ begin
   from jsonb_array_elements(datos -> 'accounts') as c,
        jsonb_array_elements(c.value -> 'posts') as p,
        jsonb_array_elements(p.value -> 'weeks') as w;
+
+  insert into public.favoritos (usuario_id, publicacion_id, creado)
+  select f.usuario_id, f.publicacion_id, f.creado
+  from jsonb_to_recordset(favs) as f (usuario_id uuid, publicacion_id uuid, creado timestamptz)
+  where exists (select 1 from public.publicaciones p where p.id = f.publicacion_id)
+  on conflict do nothing;
 end;
 $$;
 
@@ -191,7 +230,7 @@ $$;
 -- Sin login (rol "anon") no hay acceso a nada. Los usuarios logueados
 -- ("authenticated") pasan siempre por las políticas de arriba.
 
-revoke all on public.perfiles, public.cuentas, public.publicaciones, public.semanas from anon;
+revoke all on public.perfiles, public.cuentas, public.publicaciones, public.semanas, public.favoritos from anon;
 revoke execute on function public.reemplazar_todo(jsonb) from public, anon;
 revoke execute on function public.es_editor() from public, anon;
 revoke execute on function public.crear_perfil() from public, anon, authenticated;
@@ -199,5 +238,6 @@ revoke execute on function public.crear_perfil() from public, anon, authenticate
 grant usage on schema public to authenticated;
 grant select on public.perfiles to authenticated;
 grant select, insert, update, delete on public.cuentas, public.publicaciones, public.semanas to authenticated;
+grant select, insert, delete on public.favoritos to authenticated;
 grant execute on function public.es_editor() to authenticated;
 grant execute on function public.reemplazar_todo(jsonb) to authenticated;
