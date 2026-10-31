@@ -1,20 +1,20 @@
 /*
  * Configuración de Kanshi.
  *
- * Por defecto los datos se guardan sólo en este navegador (localStorage).
- * Para sincronizar con Supabase:
- *   1. Creá un proyecto en https://supabase.com
- *   2. Ejecutá supabase/schema.sql en el SQL Editor del proyecto.
- *   3. Completá url y anonKey (Project Settings → API) y poné enabled: true.
- * Ver README.md para más detalles.
+ * Mientras url y anonKey estén vacíos, la app funciona en "modo local":
+ * los datos quedan sólo en este navegador.
+ *
+ * Para guardar en la nube con Supabase, completá los dos valores con los de tu
+ * proyecto (Supabase → Project Settings → API Keys / Data API). Ver
+ * SUPABASE.md para el paso a paso.
+ *
+ * ⚠ El repositorio es público. Acá va SÓLO la clave pública
+ *   ("publishable" o "anon"). NUNCA pegues la clave "secret" ni la
+ *   "service_role": esas dan acceso total a la base de datos.
  */
 window.KANSHI_CONFIG = {
   supabase: {
-    enabled: false,
-    url: '',      // ej: 'https://xxxxxxxx.supabase.co'
-    anonKey: '',  // clave pública "anon"
-    table: 'kanshi_estado',
-    // Identificador del documento a sincronizar. Usá el mismo valor en todos tus dispositivos.
-    documentId: 'principal',
+    url: '',      // ej: 'https://abcdefghijkl.supabase.co'
+    anonKey: '',  // ej: 'sb_publishable_...' (o la clave "anon" que empieza con 'eyJ')
   },
 };
