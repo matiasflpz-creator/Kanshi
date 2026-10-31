@@ -14,7 +14,7 @@
  */
 window.KANSHI_CONFIG = {
   supabase: {
-    url: '',      // ej: 'https://abcdefghijkl.supabase.co'
-    anonKey: '',  // ej: 'sb_publishable_...' (o la clave "anon" que empieza con 'eyJ')
+    url: 'https://gprcyprfbsxeqhwpfepo.supabase.co',
+    anonKey: 'sb_publishable_dlFouR4t5BeqCxBwAKdM_w_BXV7seOC',
   },
 };
