@@ -18,6 +18,12 @@
   let session = null;
   let role = 'editor';        // en modo local siempre es editor
   let lastReload = 0;
+  let favorites = new Set();  // ids de publicaciones favoritas (sólo editores)
+  let favoritesError = null;  // mensaje si los favoritos no están disponibles
+  let searchQuery = '';
+
+  const PAGE_SIZE = 5;
+  const collator = new Intl.Collator('es', { sensitivity: 'base', numeric: true });
 
   const isCloud = () => B.mode === 'supabase';
   const canEdit = () => role === 'editor';
@@ -38,7 +44,7 @@
   const validId = (id) => (typeof id === 'string' && UUID_RE.test(id) ? id : uid());
 
   function defaultUi() {
-    return { accountId: null, postByAccount: {}, newestFirst: true, period: { from: null, to: null, scope: 'account' } };
+    return { accountId: null, postByAccount: {}, pageByAccount: {}, newestFirst: true, period: { from: null, to: null, scope: 'account' } };
   }
 
   function defaultAccounts() {
@@ -143,8 +149,34 @@
     const acc = currentAccount();
     const id = state.ui.postByAccount[acc.id];
     if (id === SUMMARY_TAB && acc.posts.length) return null;
-    return acc.posts.find((p) => p.id === id) || acc.posts[0] || null;
+    return acc.posts.find((p) => p.id === id) || sortedPosts(acc)[0] || null;
   }
+
+  // Publicaciones de una cuenta en orden alfabético (A-Z).
+  const sortedPosts = (acc) => [...acc.posts].sort((a, b) => collator.compare(a.name, b.name));
+
+  // Sin tildes ni mayúsculas, para buscar.
+  const fold = (t) => t.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+
+  // Lleva la lista a la página donde está la publicación.
+  function revealPost(acc, postId) {
+    let list = filteredPosts(acc);
+    if (!list.some((p) => p.id === postId)) {
+      searchQuery = '';
+      $('#post-search').value = '';
+      list = sortedPosts(acc);
+    }
+    const i = list.findIndex((p) => p.id === postId);
+    if (i >= 0) state.ui.pageByAccount[acc.id] = Math.floor(i / PAGE_SIZE);
+  }
+
+  function filteredPosts(acc) {
+    const q = fold(searchQuery.trim());
+    const all = sortedPosts(acc);
+    return q ? all.filter((p) => fold(p.name).includes(q)) : all;
+  }
+
+  const showFavorites = () => canEdit() && !favoritesError;
 
   // ---------- Formato ----------
 
@@ -210,19 +242,61 @@
   function renderPostTabs() {
     const acc = currentAccount();
     const post = currentPost();
-    const el = $('#post-tabs');
-    if (!acc.posts.length) {
-      el.innerHTML = '';
+    const hasPosts = acc.posts.length > 0;
+    const summary = isSummaryTab();
+
+    $('#btn-summary').hidden = !hasPosts;
+    $('#btn-summary').classList.toggle('active', summary);
+    $('#btn-summary').setAttribute('aria-current', summary ? 'page' : 'false');
+    $('#post-search-wrap').hidden = !hasPosts;
+    $('#list-section').hidden = !hasPosts;
+    $('#post-nav').classList.toggle('post-nav-empty', !hasPosts);
+
+    const item = (p) => {
+      const active = !summary && post && p.id === post.id;
+      const fav = favorites.has(p.id);
+      return `
+        <div class="post-item ${active ? 'active' : ''}">
+          <button class="post-open" data-post="${p.id}" ${active ? 'aria-current="page"' : ''} title="${esc(p.name)}">
+            <span class="post-name">${esc(p.name)}</span><span class="tab-count" title="Semanas cargadas">${p.weeks.length}</span>
+          </button>
+          ${showFavorites() ? starButton(p, fav) : ''}
+        </div>`;
+    };
+
+    // Favoritos de esta cuenta (sólo editores)
+    const favPosts = showFavorites() ? sortedPosts(acc).filter((p) => favorites.has(p.id)) : [];
+    $('#fav-section').hidden = !favPosts.length;
+    $('#fav-list').innerHTML = favPosts.map(item).join('');
+
+    if (!hasPosts) {
+      $('#post-list').innerHTML = '';
+      $('#pager').innerHTML = '';
       return;
     }
-    const summary = isSummaryTab();
-    el.innerHTML = `<button role="tab" class="tab tab-summary ${summary ? 'active' : ''}" aria-selected="${summary}" data-post="${SUMMARY_TAB}">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V10 M10 20V4 M16 20v-7 M22 20H2"/></svg>Resumen
-      </button>` + acc.posts
-      .map((p) => `<button role="tab" class="tab ${post && p.id === post.id ? 'active' : ''}" aria-selected="${post && p.id === post.id}" data-post="${p.id}">${esc(p.name)}<span class="tab-count">${p.weeks.length}</span></button>`)
-      .join('');
-    const active = el.querySelector('.tab.active');
-    if (active) active.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+
+    // Lista paginada
+    const list = filteredPosts(acc);
+    const pages = Math.max(1, Math.ceil(list.length / PAGE_SIZE));
+    const page = Math.min(Math.max(0, state.ui.pageByAccount[acc.id] || 0), pages - 1);
+    state.ui.pageByAccount[acc.id] = page;
+    const q = searchQuery.trim();
+    $('#list-title').textContent = q
+      ? `${list.length} resultado${list.length === 1 ? '' : 's'} para “${q}”`
+      : `Publicaciones (${list.length})`;
+    $('#post-list').innerHTML = list.length
+      ? list.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE).map(item).join('')
+      : `<p class="post-empty">No hay publicaciones que coincidan con “${esc(q)}”.</p>`;
+    $('#pager').innerHTML = pages > 1
+      ? `<button class="btn btn-ghost btn-sm" data-page="${page - 1}" ${page === 0 ? 'disabled' : ''}>← Anterior</button>
+         <span class="pager-info">Página ${page + 1} de ${pages}</span>
+         <button class="btn btn-ghost btn-sm" data-page="${page + 1}" ${page >= pages - 1 ? 'disabled' : ''}>Siguiente →</button>`
+      : '';
+  }
+
+  function starButton(p, fav) {
+    const label = fav ? `Quitar ${p.name} de favoritos` : `Marcar ${p.name} como favorita`;
+    return `<button class="star-btn ${fav ? 'on' : ''}" data-fav="${p.id}" data-action="toggle-fav" data-edit aria-pressed="${fav}" title="${fav ? 'Quitar de favoritos' : 'Marcar como favorita'}" aria-label="${esc(label)}">${fav ? '★' : '☆'}</button>`;
   }
 
   function renderPostView() {
@@ -253,6 +327,7 @@
       <div class="post-head">
         <div class="post-title">
           <h2>${esc(post.name)}</h2>
+          ${showFavorites() ? starButton(post, favorites.has(post.id)) : ''}
           <div class="post-title-actions">
             <button class="icon-btn" data-action="rename-post" data-edit title="Renombrar publicación" aria-label="Renombrar publicación">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16z M14 6l4 4"/></svg>
@@ -407,7 +482,7 @@
 
   function periodItems() {
     const accounts = state.ui.period.scope === 'all' ? state.accounts : [currentAccount()];
-    return accounts.flatMap((account) => account.posts.map((post) => ({ account, post })));
+    return accounts.flatMap((account) => sortedPosts(account).map((post) => ({ account, post })));
   }
 
   function periodPreset(preset) {
@@ -859,6 +934,7 @@
     const post = { id: uid(), name, createdAt: Date.now(), firstIsBaseline: false, weeks: [] };
     acc.posts.push(post);
     state.ui.postByAccount[acc.id] = post.id;
+    revealPost(acc, post.id);
     saveUi();
     render();
     commit({ type: 'addPost', accountId: acc.id, post });
@@ -869,6 +945,7 @@
     const name = await promptName({ title: 'Renombrar publicación', label: 'Nombre', value: post.name });
     if (!name) return;
     post.name = name;
+    revealPost(currentAccount(), post.id);
     render();
     commit({ type: 'updatePost', id: post.id, fields: { name } });
   }
@@ -883,10 +960,13 @@
       confirm: 'Eliminar',
     });
     if (!ok) return;
-    const idx = acc.posts.indexOf(post);
-    acc.posts.splice(idx, 1);
-    const neighbor = acc.posts[idx] || acc.posts[idx - 1];
+    const sorted = sortedPosts(acc);
+    const idx = sorted.indexOf(post);
+    const neighbor = sorted[idx + 1] || sorted[idx - 1];
+    acc.posts.splice(acc.posts.indexOf(post), 1);
+    favorites.delete(post.id);
     state.ui.postByAccount[acc.id] = neighbor ? neighbor.id : null;
+    if (neighbor) revealPost(acc, neighbor.id);
     saveUi();
     render();
     if (await commit({ type: 'deletePost', id: post.id })) toast('Publicación eliminada');
@@ -915,6 +995,44 @@
     renderPostTabs();
     renderPostView();
     if (await commit({ type: 'deleteWeek', id: weekId })) toast('Semana borrada');
+  }
+
+  // ---------- Favoritos ----------
+
+  async function toggleFavorite(postId) {
+    if (!canEdit()) return;
+    if (favoritesError) return toast(favoritesError, 'error');
+    const on = !favorites.has(postId);
+    if (on) favorites.add(postId);
+    else favorites.delete(postId);
+    renderPostTabs();
+    renderPostView();
+    try {
+      await B.setFavorite(postId, on);
+      toast(on ? 'Agregada a favoritos' : 'Quitada de favoritos');
+    } catch (err) {
+      console.error(err);
+      if (on) favorites.delete(postId);
+      else favorites.add(postId);
+      renderPostTabs();
+      renderPostView();
+      toast(errorMessage(err, 'No se pudo guardar el favorito.'), 'error');
+    }
+  }
+
+  async function loadFavorites() {
+    favorites = new Set();
+    favoritesError = null;
+    if (!canEdit()) return;
+    try {
+      favorites = new Set(await B.loadFavorites());
+    } catch (err) {
+      // Por ejemplo, si todavía no se actualizó la base de datos: la app sigue andando sin favoritos.
+      console.warn('[Kanshi] Favoritos no disponibles.', err);
+      favoritesError = /does not exist|Could not find the table|schema cache/i.test(String(err && err.message))
+        ? 'Para usar favoritos falta actualizar la base de datos (ver SUPABASE.md, “Actualizar la base de datos”).'
+        : errorMessage(err, 'No se pudieron leer los favoritos.');
+    }
   }
 
   // ---------- Respaldo y Excel ----------
@@ -1066,7 +1184,7 @@
 
     // Resumen
     const summary = [['Cuenta', 'Publicación', 'Semanas', 'Vistas acumuladas', 'Clicks acumulados', 'Ventas acumuladas', 'Facturación registrada', 'Conversión total']];
-    state.accounts.forEach((a) => a.posts.forEach((p) => {
+    state.accounts.forEach((a) => sortedPosts(a).forEach((p) => {
       const s = KanshiCalc.summarize(KanshiCalc.computeWeeks(p.weeks, p));
       summary.push([a.name, p.name, s ? s.weeks : 0, s ? s.totalViews : 0, s ? s.totalClicks : 0, s ? s.totalSales : 0, s ? s.totalRevenue : 0, s ? s.conversion : null]);
     }));
@@ -1080,7 +1198,7 @@
       'Δ Vistas', 'Δ Clicks', 'Δ Ventas', 'Δ Precio', 'Δ Facturación', 'Δ Conversión',
       'Vistas acum.', 'Clicks acum.', 'Ventas acum.'];
     const formats = [null, null, INT, INT, INT, MONEY, MONEY, CONV, PCT, PCT, PCT, PCT, PCT, PCT, INT, INT, INT];
-    state.accounts.forEach((a) => a.posts.forEach((p) => {
+    state.accounts.forEach((a) => sortedPosts(a).forEach((p) => {
       const rows = KanshiCalc.computeWeeks(p.weeks, p);
       const aoa = [[`${a.name} · ${p.name}`], header];
       rows.forEach((r) => {
@@ -1118,17 +1236,33 @@
       const b = e.target.closest('[data-account]');
       if (!b) return;
       state.ui.accountId = b.dataset.account;
+      searchQuery = '';
+      $('#post-search').value = '';
       saveUi();
       render();
     });
 
-    $('#post-tabs').addEventListener('click', (e) => {
+    $('#post-nav').addEventListener('click', (e) => {
+      const fav = e.target.closest('[data-fav]');
+      if (fav) return toggleFavorite(fav.dataset.fav);
+      const pageBtn = e.target.closest('[data-page]');
+      if (pageBtn) {
+        state.ui.pageByAccount[currentAccount().id] = Number(pageBtn.dataset.page);
+        saveUi();
+        return renderPostTabs();
+      }
       const b = e.target.closest('[data-post]');
       if (!b) return;
       state.ui.postByAccount[currentAccount().id] = b.dataset.post;
       saveUi();
       renderPostTabs();
       renderPostView();
+    });
+
+    $('#post-search').addEventListener('input', (e) => {
+      searchQuery = e.target.value;
+      state.ui.pageByAccount[currentAccount().id] = 0;
+      renderPostTabs();
     });
 
     $('#btn-rename-account').addEventListener('click', renameAccount);
@@ -1139,6 +1273,7 @@
       if (!b) return;
       if (b.hasAttribute('data-edit') && !canEdit()) return;
       const post = currentPost();
+      if (b.dataset.fav) return toggleFavorite(b.dataset.fav);
       switch (b.dataset.action) {
         case 'add-post': return addPost();
         case 'rename-post': return renamePost();
@@ -1157,6 +1292,9 @@
         case 'open-post':
           state.ui.accountId = b.dataset.account;
           state.ui.postByAccount[b.dataset.account] = b.dataset.post;
+          searchQuery = '';
+          $('#post-search').value = '';
+          revealPost(currentAccount(), b.dataset.post);
           saveUi();
           return render();
         case 'toggle-baseline':
@@ -1240,6 +1378,10 @@
       if (canEdit()) await B.apply({ type: 'replaceAll' }, state);
     }
     fixUiSelection();
+    await loadFavorites();
+    // Favoritos de publicaciones que ya no existen (por ejemplo, borradas desde otro dispositivo).
+    const ids = new Set(state.accounts.flatMap((a) => a.posts.map((p) => p.id)));
+    favorites.forEach((id) => { if (!ids.has(id)) favorites.delete(id); });
     lastReload = Date.now();
   }
 
@@ -1281,8 +1423,11 @@
         ? 'Editor: podés cargar, editar y borrar datos.'
         : 'Lector: podés ver los datos, pero no modificarlos.';
     }
+    const active = currentPost();
+    if (active) revealPost(currentAccount(), active.id);
     render();
     updateUploadUi();
+    if (favoritesError && isCloud()) toast(favoritesError, 'error');
     setStatus(isCloud() ? 'Datos en la nube' : 'Datos guardados en este navegador (modo local)');
   }
 
@@ -1445,6 +1590,10 @@
       setTimeout(() => {
         if (event === 'SIGNED_OUT') {
           session = null;
+          favorites = new Set();
+          searchQuery = '';
+          $('#post-search').value = '';
+          $('#toast').hidden = true;
           state = null;
           showAuth('login');
         } else if (event === 'PASSWORD_RECOVERY') {

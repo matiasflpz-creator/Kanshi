@@ -137,6 +137,23 @@ Va a entrar como **lector**: ve todo, pero no puede cambiar nada.
 
 ---
 
+## Actualizar la base de datos (cuando la app suma funciones)
+
+Algunas mejoras necesitan cambios en la base de datos. Por ejemplo, los **favoritos** usan una tabla nueva. Si la app te muestra *"Para usar favoritos falta actualizar la base de datos"*, hacé esto una vez:
+
+1. Abrí [supabase/schema.sql](https://github.com/matiasflpz-creator/Kanshi/blob/main/supabase/schema.sql) y tocá **Copy raw file** (el ícono de dos cuadraditos, arriba a la derecha del código).
+2. En Supabase: **SQL Editor** → **New query** → pegá todo → **Run**. Si aparece el aviso de "operaciones destructivas", confirmá con **Run this query**.
+3. Tiene que decir **"Success. No rows returned"**.
+4. Recargá la app (**Ctrl + F5**).
+
+Es el mismo archivo del paso 1. Se puede ejecutar todas las veces que haga falta: **no borra tus datos, usuarios ni roles**, sólo agrega lo que falta.
+
+### Favoritos
+
+- Sólo los **editores** tienen favoritos, y cada editor tiene los suyos. Los lectores no ven la estrella.
+- Se guardan en la nube (tabla `favoritos`), así que los ves en cualquier dispositivo.
+- La base de datos no deja que un usuario vea ni cambie favoritos ajenos, ni que un lector agregue favoritos.
+
 ## Problemas frecuentes
 
 | Qué pasa | Qué hacer |
